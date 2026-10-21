@@ -1,0 +1,300 @@
+#region VEXcode Generated Robot Configuration
+from vex import *
+import urandom
+import math
+
+# Brain should be defined by default
+brain=Brain()
+
+# Robot configuration code
+controller_1 = Controller(PRIMARY)
+left_front = Motor(Ports.PORT2, GearSetting.RATIO_6_1, True)
+left_mid = Motor(Ports.PORT1, GearSetting.RATIO_18_1, False)
+left_back = Motor(Ports.PORT14, GearSetting.RATIO_6_1, True)
+right_front = Motor(Ports.PORT12, GearSetting.RATIO_6_1, False)
+right_mid = Motor(Ports.PORT10, GearSetting.RATIO_18_1, True)
+right_back = Motor(Ports.PORT13, GearSetting.RATIO_6_1, False)
+claw = DigitalOut(brain.three_wire_port.h)
+lift_left = Motor(Ports.PORT11, GearSetting.RATIO_36_1, False)
+lift_right = Motor(Ports.PORT19, GearSetting.RATIO_36_1, True)
+Y_Rotational = Rotation(Ports.PORT9, False)
+X_Rotational = Rotation(Ports.PORT3, False)
+inertial_17 = Inertial(Ports.PORT17)
+right_wing = Motor(Ports.PORT16, GearSetting.RATIO_18_1, False)
+left_wing = Motor(Ports.PORT15, GearSetting.RATIO_18_1, True)
+
+
+# wait for rotation sensor to fully initialize
+wait(30, MSEC)
+
+
+# Make random actually random
+def initializeRandomSeed():
+    wait(100, MSEC)
+    random = brain.battery.voltage(MV) + brain.battery.current(CurrentUnits.AMP) * 100 + brain.timer.system_high_res()
+    urandom.seed(int(random))
+      
+# Set random seed 
+initializeRandomSeed()
+
+
+def play_vexcode_sound(sound_name):
+    # Helper to make playing sounds from the V5 in VEXcode easier and
+    # keeps the code cleaner by making it clear what is happening.
+    print("VEXPlaySound:" + sound_name)
+    wait(5, MSEC)
+
+# add a small delay to make sure we don't print in the middle of the REPL header
+wait(200, MSEC)
+# clear the console to make sure we don't have the REPL in the console
+print("\033[2J")
+
+#endregion VEXcode Generated Robot Configuration
+
+# ------------------------------------------
+# 
+# 	Project:
+#	Author:
+#	Created:
+#	Configuration:
+# 
+# ------------------------------------------
+
+# Library imports
+from vex import *
+
+# Begin project code
+right_drive = MotorGroup(right_back, right_mid, right_front)
+left_drive = MotorGroup(left_back, left_mid, left_front)
+lift = MotorGroup(lift_left, lift_right)
+wings = MotorGroup(left_wing, right_wing)
+right_back.set_velocity(100,PERCENT)
+right_mid.set_velocity(100,PERCENT)
+right_front.set_velocity(100,PERCENT)
+left_back.set_velocity(100,PERCENT)
+left_mid.set_velocity(100,PERCENT)
+left_front.set_velocity(100,PERCENT)
+lift.set_velocity(100,PERCENT)
+wings.set_velocity(100, PERCENT)
+lift.set_stopping(HOLD)
+Close = True
+Open = False
+
+
+
+def toggle_claw():
+    ### code to toggle the opening/closing of the claw###
+
+    while True:
+
+        if controller_1.buttonR1.pressing():
+
+            if claw.value() == True:
+                claw.set(False)
+            else:
+                claw.set(True)
+            
+            while controller_1.buttonR1.pressing():
+            
+                wait(20, MSEC)
+                pass
+                
+        wait(20, MSEC)
+
+
+def pre_autonomous():
+    # actions to do when the program starts
+    brain.screen.clear_screen()
+    brain.screen.print("pre auton code")
+    Y_Rotational.set_position(0, DEGREES)
+    X_Rotational.set_position(0,DEGREES)
+    inertial_17.calibrate()
+    while inertial_17.is_calibrating():
+        wait(50, MSEC)
+    inertial_17.set_heading(0,DEGREES)
+    wait(1, SECONDS)
+
+
+
+#Drive Forward Function
+def Drive_forward(Forward_dist, Forward_velo, timeout=3000):
+
+    Y_Rotational.reset_position()
+
+    target_turns = Forward_dist*0.31
+
+    brain.timer.clear()
+
+    left_drive.set_velocity(Forward_velo, PERCENT)
+    right_drive.set_velocity(Forward_velo, PERCENT)
+
+    left_drive.set_stopping(BRAKE)
+    right_drive.set_stopping(BRAKE)
+
+
+    left_drive.spin(FORWARD)
+    right_drive.spin(FORWARD)
+
+
+    while abs(Y_Rotational.position(TURNS)) < abs(target_turns) and brain.timer.time(MSEC) < timeout:
+        wait(10, MSEC)
+
+    # Stop all motors
+    left_drive.stop()
+    right_drive.stop()
+
+
+
+
+#Drive Back Function
+def Drive_back(Back_dist, Back_velo):
+
+    # Reset the rotational sensor
+    Y_Rotational.reset_position()
+
+    target_turns = Back_dist * 0.31
+
+    # Set motor speeds
+    left_drive.set_velocity(Back_velo, PERCENT)
+    right_drive.set_velocity(Back_velo, PERCENT)
+
+
+    left_drive.set_stopping(BRAKE)
+    right_drive.set_stopping(BRAKE)
+
+
+    # Start all motors
+    left_drive.spin(REVERSE)
+    right_drive.spin(REVERSE)
+
+
+    # Drive until the rotation sensor reaches the target
+    while abs(Y_Rotational.position(TURNS)) < abs(target_turns):
+        wait(10, MSEC)
+
+    # Stop all motors
+    left_drive.stop()
+    right_drive.stop()
+
+
+
+
+
+
+
+
+def turn_head(target_heading, speed_factor=1.0, tolerance=5, timeout=3000):
+    target_heading = target_heading % 360
+    timer = Timer()
+    timer.clear()
+
+    while timer.time(MSEC) < timeout:
+        curr_head = inertial_17.heading(DEGREES)
+        
+        error = target_heading - curr_head
+        if error > 180:
+            error -= 360
+        elif error < -180:
+            error += 360
+
+        if abs(error) <= tolerance:
+            break
+
+        motor_power = error * speed_factor
+        motor_power = max(-50, min(30, motor_power))
+
+        # Minimum power to overcome friction
+        if abs(motor_power) < 8:
+            motor_power = 8 if error > 0 else -8
+
+        left_drive.set_velocity(abs(motor_power), PERCENT)
+        right_drive.set_velocity(abs(motor_power), PERCENT)
+
+        if motor_power > 0:
+            left_drive.spin(FORWARD)
+            right_drive.spin(REVERSE)
+        else:
+            left_drive.spin(REVERSE)
+            right_drive.spin(FORWARD)
+
+        wait(10, MSEC)
+
+    left_drive.stop()
+    right_drive.stop()
+
+
+
+
+
+
+
+
+
+
+    
+def autonomous():
+    brain.screen.clear_screen()
+    brain.screen.print("autonomous code")
+    # first pin
+    claw.set(Close)
+    lift.spin_for(FORWARD, 300, DEGREES, wait=False)
+    right_wing.spin_for(FORWARD, 300, DEGREES)
+    Drive_forward(4, 70)
+    wait(200, MSEC)
+    turn_head(90, 1, 55)
+    Drive_forward(5, 100)
+    Drive_forward(5, 50, 500)
+    lift.spin_for(REVERSE, 200,DEGREES,wait=True)
+    claw.set(Open)
+    lift.spin_for(FORWARD, 50, DEGREES,wait=True)
+    lift.spin_for(FORWARD, 150, DEGREES,wait=False) 
+    Drive_back(2, 70)
+    wait(200, MSEC)
+    turn_head(50, 1, 10)
+    Drive_forward(3, 30)
+
+
+
+
+
+def user_control():
+    brain.screen.clear_screen()
+
+    left_drive.set_max_torque(100,PERCENT)
+    right_drive.set_max_torque(100,PERCENT)
+    claw_code = Thread(toggle_claw)
+
+    while True:
+        a3 = controller_1.axis3.position()
+        a1 = controller_1.axis1.position()
+
+        scaled_a1 = (a1 * abs(a1)) / 100.0
+
+        if (abs(a3) + abs(scaled_a1)) > 3:
+
+            left_drive.set_velocity((a3 + scaled_a1), PERCENT)
+            right_drive.set_velocity((a3 - scaled_a1), PERCENT)
+        else:
+            left_drive.set_velocity(0, PERCENT)
+            right_drive.set_velocity(0, PERCENT)
+
+        left_drive.spin(FORWARD)
+        right_drive.spin(FORWARD)
+        
+
+        if controller_1.buttonL1.pressing():
+            lift.spin(FORWARD)
+        elif controller_1.buttonL2.pressing():
+            lift.spin(REVERSE)
+        else:
+            lift.stop()
+
+        if controller_1.buttonR2.pressing():
+            wings.spin(FORWARD)
+        else:
+                wings.stop()
+        wait(20, MSEC)
+
+# create competition instance
+comp = Competition(user_control, autonomous)
+pre_autonomous()

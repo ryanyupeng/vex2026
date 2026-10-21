@@ -1,0 +1,995 @@
+"""Generated VEX deployment source. Do not edit directly.
+
+Edit python/src/*.py and run python/build_vex.py.
+"""
+# Robot hardware specification.
+"""Self-contained VEXcode program. Fill RobotSpec using README.md before running.
+
+Coordinates: +X right, +Y forward at zero heading; clockwise angles positive.
+All navigation uses mm, degrees and measured seconds. No external sensor needed.
+"""
+from vex import *
+import math
+
+
+class RobotSpec:
+    # Unknown dimensions deliberately have no guessed default. Zero is a valid offset.
+    TRACK_X_DIAMETER_MM = None
+    TRACK_Y_DIAMETER_MM = None
+    TRACK_X_SENSOR_TURNS_PER_WHEEL_TURN = 1.0
+    TRACK_Y_SENSOR_TURNS_PER_WHEEL_TURN = 1.0
+    TRACK_X_SIGN = 1                 # Sensor travel to the right is positive.
+    TRACK_Y_SIGN = 1                 # Forward travel is positive.
+    IMU_SIGN = 1                     # Clockwise rotation is positive.
+    # Signed tracking travel / clockwise rotation in radians during a pure turn.
+    # X: positive ahead of center. Y: negative to the right of center.
+    TRACK_X_ROTATION_MM_PER_RAD = None
+    TRACK_Y_ROTATION_MM_PER_RAD = None
+
+    # Order: left front/mid/back, right front/mid/back. External gearing ONLY.
+    DRIVE_WHEEL_DIAMETERS_MM = (None, None, None, None, None, None)
+    DRIVE_MOTOR_TURNS_PER_WHEEL_TURN = (None, None, None, None, None, None)
+    DRIVE_PORTS = (2, 1, 14, 12, 10, 13)
+    DRIVE_REVERSED = (True, False, True, False, True, False)
+    DRIVE_CARTRIDGE_RATIOS = (6, 18, 6, 6, 18, 6)
+    LIFT_PORTS = (11, 19)
+    LIFT_REVERSED = (False, True)
+    WING_PORTS = (15, 16)             # Left, right.
+    WING_REVERSED = (True, False)
+    X_SENSOR_PORT = 3
+    Y_SENSOR_PORT = 9
+    IMU_PORT = 17
+    CLAW_THREE_WIRE_PORT = "h"
+    CLAW_CLOSED = True
+
+    # Manually place mechanisms at these references before program startup.
+    # Encoder assignment is NOT physical homing.
+    LIFT_REFERENCE_DEG = (0.0, 0.0)
+    WING_REFERENCE_DEG = (0.0, 0.0)
+    START_X_MM = 0.0
+    START_Y_MM = 0.0
+    START_HEADING_DEG = 0.0
+
+    @classmethod
+    def validate(cls):
+        errors = []
+        for name in ("TRACK_X_DIAMETER_MM", "TRACK_Y_DIAMETER_MM",
+                     "TRACK_X_SENSOR_TURNS_PER_WHEEL_TURN",
+                     "TRACK_Y_SENSOR_TURNS_PER_WHEEL_TURN"):
+            value = getattr(cls, name)
+            if not finite(value) or value <= 0:
+                errors.append(name + " must be measured and positive")
+        for name in ("TRACK_X_ROTATION_MM_PER_RAD", "TRACK_Y_ROTATION_MM_PER_RAD"):
+            if not finite(getattr(cls, name)):
+                errors.append(name + " must be measured (zero is allowed)")
+        for name in ("TRACK_X_SIGN", "TRACK_Y_SIGN", "IMU_SIGN"):
+            if getattr(cls, name) not in (-1, 1):
+                errors.append(name + " must be +1 or -1")
+        for name in ("DRIVE_WHEEL_DIAMETERS_MM", "DRIVE_MOTOR_TURNS_PER_WHEEL_TURN"):
+            values = getattr(cls, name)
+            if len(values) != 6 or any(not finite(v) or v <= 0 for v in values):
+                errors.append(name + " needs six positive measurements")
+        for name in ("DRIVE_PORTS", "DRIVE_REVERSED", "DRIVE_CARTRIDGE_RATIOS"):
+            if len(getattr(cls, name)) != 6:
+                errors.append(name + " needs six entries")
+        if any(r not in (6, 18, 36) for r in cls.DRIVE_CARTRIDGE_RATIOS):
+            errors.append("Unsupported drive cartridge ratio")
+        if any(len(getattr(cls, name)) != 2 for name in
+               ("LIFT_PORTS", "LIFT_REVERSED", "WING_PORTS", "WING_REVERSED",
+                "LIFT_REFERENCE_DEG", "WING_REFERENCE_DEG")):
+            errors.append("Lift/wing configuration needs two entries per setting")
+        return errors
+
+
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+class ControlConfig:
+    # Starting tuning values; validate on the robot, not calibrated guarantees.
+    LOOP_MS = 20
+    MAX_LOOP_GAP_MS = 200
+    CALIBRATION_TIMEOUT_MS = 8000
+    MAX_SPEED_MM_S = 600.0
+    ACCEL_MM_S2 = 600.0
+    DECEL_MM_S2 = 800.0
+    DISTANCE_KP = 3.0
+    DISTANCE_KD = 0.15
+    HEADING_KP = 8.0                 # wheel mm/s per degree
+    HEADING_KD = 0.5                 # wheel mm/s per degree/s
+    TURN_KP = 7.0
+    TURN_KD = 0.6
+    MAX_TURN_WHEEL_MM_S = 180.0
+    TURN_SLEW_MM_S2 = 600.0
+    RATE_FILTER_TAU_S = 0.06
+    CROSS_TRACK_LOOKAHEAD_MM = 150.0
+    MAX_STEERING_OFFSET_DEG = 15.0
+    MAX_CROSS_TRACK_MM = 150.0
+    DISTANCE_TOL_MM = 10.0
+    CROSS_TRACK_TOL_MM = 15.0
+    HEADING_TOL_DEG = 2.0
+    SETTLE_SPEED_MM_S = 20.0
+    SETTLE_RATE_DEG_S = 5.0
+    SETTLE_MS = 150
+    STALL_WINDOW_MS = 600
+    STALL_MIN_PROGRESS_MM = 3.0
+    STALL_MIN_ROTATION_DEG = 1.0
+    STALL_COMMAND_MM_S = 35.0
+    MAX_TRACK_SPEED_MM_S = 2500.0    # Plausibility limits, not commands.
+    MAX_IMU_RATE_DEG_S = 800.0
+    SENSOR_JUMP_MARGIN_MM = 3.0
+    LOG_INTERVAL_MS = 200
+    ACTION_TIMEOUT_MS = 5000
+    ROUTE_TIMEOUT_MS = 15000         # Change for the intended competition period.
+    MECHANISM_TIMEOUT_MS = 3500
+    MECHANISM_TOL_DEG = 5.0
+    MECHANISM_SETTLE_RATE_DEG_S = 15.0
+    MECHANISM_SETTLE_MS = 100
+    LIFT_MAX_SKEW_DEG = 15.0
+    LIFT_SKEW_GRACE_MS = 150
+
+    # Phase 5: field-coordinate polyline following with differential steering.
+    NAV_TIMEOUT_MS = 10000
+    NAV_LOOKAHEAD_MM = 120.0
+    NAV_WAYPOINT_RADIUS_MM = 35.0
+    NAV_POSITION_TOL_MM = 15.0
+    NAV_POSITION_KP = 2.5
+    NAV_ALIGN_DEG = 55.0         # Turn in place above this bearing error.
+    NAV_RECOVERY_CROSS_MM = 100.0
+    NAV_MAX_CROSS_MM = 300.0
+    NAV_RECOVERY_SPEED_MM_S = 120.0
+    NAV_RECOVERY_TIMEOUT_MS = 2000
+    NAV_RECOVERY_ATTEMPTS = 2
+    NAV_NO_PROGRESS_MS = 2500   # Also bounds small-command creep/oscillation.
+
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+def finite(value):
+    return isinstance(value, (int, float)) and value == value and abs(value) < float("inf")
+
+
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def angle_error(target, current):
+    return (target - current + 180.0) % 360.0 - 180.0
+
+
+def approach(current, target, amount):
+    return current + clamp(target - current, -amount, amount)
+
+
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+class Result:
+    ARRIVED = "ARRIVED"
+    TIMED_OUT = "TIMED_OUT"
+    STALLED = "STALLED"
+    CANCELLED = "CANCELLED"
+    SENSOR_FAULT = "SENSOR_FAULT"
+    PATH_ERROR = "PATH_ERROR"
+    NOT_READY = "NOT_READY"
+    MECHANISM_FAULT = "MECHANISM_FAULT"
+
+    def __init__(self, status, detail=""):
+        self.status, self.detail = status, detail
+
+    def ok(self):
+        return self.status == self.ARRIVED
+
+
+class ActionFault(Exception):
+    def __init__(self, status, detail):
+        self.result = Result(status, detail)
+
+
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+class PID:
+    """Measured seconds, filtered derivative-on-measurement, conditional integration."""
+    def __init__(self, kp, ki=0.0, kd=0.0, integral_limit=0.0, tau=0.06):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.integral_limit, self.tau = integral_limit, tau
+        self.reset()
+
+    def reset(self):
+        self.integral = self.rate = 0.0
+        self.previous = None
+
+    def update(self, error, measurement, dt, limit):
+        if dt <= 0:
+            raise ValueError("PID dt must be positive")
+        raw_rate = 0.0 if self.previous is None else (measurement - self.previous) / dt
+        self.previous = measurement
+        self.rate += dt / (self.tau + dt) * (raw_rate - self.rate)
+        candidate = clamp(self.integral + error * dt, -self.integral_limit, self.integral_limit)
+        output = self.kp * error + self.ki * candidate - self.kd * self.rate
+        if abs(output) <= limit or error * output < 0:
+            self.integral = candidate
+        return clamp(self.kp * error + self.ki * self.integral - self.kd * self.rate,
+                     -limit, limit)
+
+
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+class Settler:
+    def __init__(self, duration_ms):
+        self.duration_ms, self.since = duration_ms, None
+
+    def update(self, within_tolerance, now):
+        if not within_tolerance:
+            self.since = None
+        elif self.since is None:
+            self.since = now
+        return self.since is not None and now - self.since >= self.duration_ms
+
+# Development source fragment; build_vex.py concatenates fragments in filename order.
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+class Hardware:
+    def __init__(self, spec):
+        self.brain = Brain()
+        self.controller = Controller(PRIMARY)
+        gears = {6: GearSetting.RATIO_6_1, 18: GearSetting.RATIO_18_1,
+                 36: GearSetting.RATIO_36_1}
+        self.drive = tuple(Motor(getattr(Ports, "PORT" + str(port)), gears[ratio], reverse)
+                           for port, ratio, reverse in zip(spec.DRIVE_PORTS,
+                               spec.DRIVE_CARTRIDGE_RATIOS, spec.DRIVE_REVERSED))
+        self.lift = tuple(Motor(getattr(Ports, "PORT" + str(port)), gears[36], reverse)
+                          for port, reverse in zip(spec.LIFT_PORTS, spec.LIFT_REVERSED))
+        self.wings = tuple(Motor(getattr(Ports, "PORT" + str(port)), gears[18], reverse)
+                           for port, reverse in zip(spec.WING_PORTS, spec.WING_REVERSED))
+        self.x_sensor = Rotation(getattr(Ports, "PORT" + str(spec.X_SENSOR_PORT)), False)
+        self.y_sensor = Rotation(getattr(Ports, "PORT" + str(spec.Y_SENSOR_PORT)), False)
+        self.imu = Inertial(getattr(Ports, "PORT" + str(spec.IMU_PORT)))
+        self.claw = DigitalOut(getattr(self.brain.three_wire_port, spec.CLAW_THREE_WIRE_PORT))
+        self.clock = Timer()          # Never clear this shared elapsed-time source.
+
+    def now(self):
+        return self.clock.time(MSEC)
+
+    def pause(self):
+        wait(ControlConfig.LOOP_MS, MSEC)
+
+    def check_devices(self):
+        devices = self.drive + self.lift + self.wings + (self.x_sensor, self.y_sensor, self.imu)
+        # Some VEX Python releases do not expose installed() on every device.
+        # Use it when available; plausibility/progress checks still run every tick.
+        for device in devices:
+            checker = getattr(device, "installed", None)
+            if checker is not None and not checker():
+                raise ActionFault(Result.SENSOR_FAULT, "A configured motor/sensor is disconnected")
+        if self.imu.is_calibrating():
+            raise ActionFault(Result.SENSOR_FAULT, "IMU calibration is still active")
+
+    def show(self, message):
+        print(message)
+        self.brain.screen.clear_screen()
+        self.brain.screen.print(message)
+
+
+
+# Development source fragment; build_vex.py concatenates fragments in filename order.
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+class Tracking:
+    """Both passive tracking wheels measure pose; no sideways drive is assumed."""
+    def __init__(self, hardware, spec, config):
+        self.hw, self.spec, self.cfg = hardware, spec, config
+        self.x = self.y = self.heading = self.speed = self.angular_rate = 0.0
+        self.last_time = None
+
+    def readings(self):
+        s = self.spec
+        x = self.hw.x_sensor.position(DEGREES) / 360.0 * math.pi * s.TRACK_X_DIAMETER_MM
+        y = self.hw.y_sensor.position(DEGREES) / 360.0 * math.pi * s.TRACK_Y_DIAMETER_MM
+        x *= s.TRACK_X_SIGN / s.TRACK_X_SENSOR_TURNS_PER_WHEEL_TURN
+        y *= s.TRACK_Y_SIGN / s.TRACK_Y_SENSOR_TURNS_PER_WHEEL_TURN
+        heading = self.hw.imu.rotation(DEGREES) * s.IMU_SIGN
+        if not all(finite(v) for v in (x, y, heading)):
+            raise ActionFault(Result.SENSOR_FAULT, "Nonfinite tracking/IMU measurement")
+        return x, y, heading
+
+    def reset(self, x, y, heading):
+        self.last_x, self.last_y, raw_heading = self.readings()
+        self.heading_offset = heading - raw_heading
+        self.x, self.y, self.heading = x, y, heading
+        self.last_time = self.hw.now()
+        self.speed = self.angular_rate = 0.0
+
+    def update(self):
+        now = self.hw.now()
+        elapsed = now - self.last_time
+        if elapsed <= 0:
+            return 0.0
+        if elapsed > self.cfg.MAX_LOOP_GAP_MS:
+            raise ActionFault(Result.SENSOR_FAULT, "Control loop missed its timing budget")
+        dt = elapsed / 1000.0
+        x, y, raw_heading = self.readings()
+        heading = raw_heading + self.heading_offset
+        delta_deg = heading - self.heading
+        delta = math.radians(delta_deg)
+        dx = x - self.last_x - delta * self.spec.TRACK_X_ROTATION_MM_PER_RAD
+        dy = y - self.last_y - delta * self.spec.TRACK_Y_ROTATION_MM_PER_RAD
+        travel = math.sqrt(dx * dx + dy * dy)
+        if (travel > self.cfg.MAX_TRACK_SPEED_MM_S * dt + self.cfg.SENSOR_JUMP_MARGIN_MM
+                or abs(delta_deg) > self.cfg.MAX_IMU_RATE_DEG_S * dt):
+            raise ActionFault(Result.SENSOR_FAULT, "Implausible tracking/IMU jump")
+        arc = 1.0 if abs(delta) < 1e-6 else 2.0 * math.sin(delta / 2.0) / delta
+        mid = math.radians(self.heading) + delta / 2.0
+        self.x += arc * (dx * math.cos(mid) + dy * math.sin(mid))
+        self.y += arc * (-dx * math.sin(mid) + dy * math.cos(mid))
+        alpha = dt / (self.cfg.RATE_FILTER_TAU_S + dt)
+        self.speed += alpha * (travel / dt - self.speed)
+        self.angular_rate += alpha * (delta_deg / dt - self.angular_rate)
+        self.heading = heading
+        self.last_x, self.last_y, self.last_time = x, y, now
+        return dt
+
+# Development source fragment; build_vex.py concatenates fragments in filename order.
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+class Drive:
+    def __init__(self, hardware, spec, config):
+        self.hw, self.spec, self.cfg = hardware, spec, config
+
+    def command(self, left_mm_s, right_mm_s):
+        speeds = (left_mm_s,) * 3 + (right_mm_s,) * 3
+        rpm = [speed * 60.0 * ratio / (math.pi * diameter)
+               for speed, ratio, diameter in zip(speeds,
+                   self.spec.DRIVE_MOTOR_TURNS_PER_WHEEL_TURN,
+                   self.spec.DRIVE_WHEEL_DIAMETERS_MM)]
+        caps = [3600.0 / ratio for ratio in self.spec.DRIVE_CARTRIDGE_RATIOS]
+        # Scale together so saturation preserves the requested steering ratio.
+        scale = max([1.0, abs(left_mm_s) / self.cfg.MAX_SPEED_MM_S,
+                     abs(right_mm_s) / self.cfg.MAX_SPEED_MM_S]
+                    + [abs(value) / cap for value, cap in zip(rpm, caps)])
+        for motor, value in zip(self.hw.drive, rpm):
+            if abs(value) < 1e-6:
+                motor.stop(BRAKE)
+            else:
+                motor.spin(FORWARD if value > 0 else REVERSE, abs(value) / scale, RPM)
+
+    def stop(self):
+        for motor in self.hw.drive:
+            motor.stop(BRAKE)
+
+
+
+# Development source fragment; build_vex.py concatenates fragments in filename order.
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+class Mechanism:
+    """Absolute-position commands monitored even while the chassis moves."""
+    def __init__(self, name, motors, hardware, config, max_skew=None):
+        self.name, self.motors, self.hw, self.cfg = name, motors, hardware, config
+        self.max_skew, self.active, self.target = max_skew, False, None
+
+    def start(self, target_deg, speed_pct, timeout_ms=None):
+        if self.active:
+            raise ActionFault(Result.MECHANISM_FAULT, self.name + " already has an active move")
+        self.target = target_deg
+        self.started = self.hw.now()
+        self.timeout = timeout_ms if timeout_ms is not None else self.cfg.MECHANISM_TIMEOUT_MS
+        if (not finite(target_deg) or not finite(speed_pct) or not 0 < speed_pct <= 100
+                or not finite(self.timeout) or self.timeout <= 0):
+            raise ValueError("Invalid mechanism command")
+        self.settler = Settler(self.cfg.MECHANISM_SETTLE_MS)
+        self.skew_settler = Settler(self.cfg.LIFT_SKEW_GRACE_MS)
+        self.active = True
+        for motor in self.motors:
+            motor.set_stopping(HOLD)
+            motor.set_timeout(self.timeout, MSEC)
+            motor.spin_to_position(target_deg, DEGREES, speed_pct, PERCENT, wait=False)
+
+    def update(self):
+        if not self.active:
+            return
+        now = self.hw.now()
+        positions = [m.position(DEGREES) for m in self.motors]
+        rates = [m.velocity(RPM) * 6.0 for m in self.motors]
+        if not all(finite(v) for v in positions + rates):
+            raise ActionFault(Result.SENSOR_FAULT, self.name + " invalid feedback")
+        if self.max_skew is not None:
+            skew = max(positions) - min(positions)
+            if self.skew_settler.update(skew > self.max_skew, now):
+                raise ActionFault(Result.MECHANISM_FAULT, self.name + " motors disagree")
+        settled = (all(abs(p - self.target) <= self.cfg.MECHANISM_TOL_DEG for p in positions)
+                   and all(abs(r) <= self.cfg.MECHANISM_SETTLE_RATE_DEG_S for r in rates))
+        if self.settler.update(settled, now):
+            self.stop()
+        elif now - self.started >= self.timeout:
+            raise ActionFault(Result.TIMED_OUT, self.name + " target not reached")
+
+    def stop(self):
+        for motor in self.motors:
+            motor.stop(HOLD)
+        self.active = False
+
+
+
+# Development source fragment; build_vex.py concatenates fragments in filename order.
+
+"""Ordered field-coordinate line segments; geometry only, no VEX calls."""
+
+
+class NavigationPath:
+    def __init__(self, start, waypoints):
+        self.points = [start]
+        for point in waypoints:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                raise ValueError("Each waypoint must be an (x_mm, y_mm) pair")
+            if not all(finite(value) for value in point):
+                raise ValueError("Waypoint coordinates must be finite")
+            point = (float(point[0]), float(point[1]))
+            # Consecutive duplicate points have no segment direction.
+            if self.distance(point, self.points[-1]) > 1e-6:
+                self.points.append(point)
+        if len(self.points) == 1:
+            self.points.append(start)  # Already at the target: may still need a turn.
+        self.index = 0
+
+    @staticmethod
+    def distance(a, b):
+        return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
+
+    def sample(self, position, lookahead, waypoint_radius):
+        # Advance only through the current waypoint's acceptance circle. Never
+        # search globally: an intersecting/returning path must retain its order.
+        while self.index < len(self.points) - 2:
+            if self.distance(position, self.points[self.index + 1]) > waypoint_radius:
+                break
+            self.index += 1
+        a, b = self.points[self.index], self.points[self.index + 1]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = math.sqrt(dx * dx + dy * dy)
+        projection = 0.0 if length < 1e-6 else clamp(
+            ((position[0] - a[0]) * dx + (position[1] - a[1]) * dy) / length, 0.0, length)
+        fraction = 0.0 if length < 1e-6 else projection / length
+        closest = (a[0] + dx * fraction, a[1] + dy * fraction)
+        fraction = 0.0 if length < 1e-6 else min(length, projection + lookahead) / length
+        target = (a[0] + dx * fraction, a[1] + dy * fraction)
+        cross = self.distance(position, closest)
+        remaining = self.distance(position, b)
+        for i in range(self.index + 1, len(self.points) - 1):
+            remaining += self.distance(self.points[i], self.points[i + 1])
+        return target, closest, cross, remaining
+
+    def at_last_segment(self):
+        return self.index == len(self.points) - 2
+
+"""Dead-reckoning navigation using the existing shared motion coordinator."""
+
+
+class Navigator:
+    def __init__(self, robot):
+        self.robot = robot
+
+    def follow_path(self, waypoints, final_heading_deg=None,
+                    max_speed_mm_s=None, reverse=False, timeout_ms=None):
+        """Follow ordered absolute (x,y) destinations. Start is prepended automatically.
+
+        Uses a moving lookahead point and heading PD, not the X-drive mixer.
+        Corner waypoints are accepted within NAV_WAYPOINT_RADIUS_MM; use separate
+        go_to_pose calls for exact stops. No obstacle sensing or global localization.
+        """
+        r, c, p = self.robot, self.robot.cfg, self.robot.tracking
+        speed_limit = c.MAX_SPEED_MM_S if max_speed_mm_s is None else max_speed_mm_s
+        timeout = c.NAV_TIMEOUT_MS if timeout_ms is None else timeout_ms
+        try:
+            if not r.ready or p.last_time is None:
+                return r.failure(Result.NOT_READY, "Begin autonomous before navigation")
+            if (not isinstance(waypoints, (list, tuple)) or not waypoints
+                    or not finite(speed_limit) or speed_limit <= 0
+                    or not finite(timeout) or timeout <= 0
+                    or not isinstance(reverse, bool)
+                    or (final_heading_deg is not None and not finite(final_heading_deg))):
+                raise ValueError("Invalid path, heading, speed, reverse flag or timeout")
+            path = NavigationPath((p.x, p.y), waypoints)
+            speed_limit = min(speed_limit, c.MAX_SPEED_MM_S)
+            direction = -1.0 if reverse else 1.0
+            pid = PID(c.HEADING_KP, kd=c.HEADING_KD, tau=c.RATE_FILTER_TAU_S)
+            settled = Settler(c.SETTLE_MS)
+            started = r.hw.now()
+            speed = turn = 0.0
+            recovery_since, recovery_count = None, 0
+            previous_index = -1
+            best_remaining = best_angle = float("inf")
+            progress_since = started
+            previous_mode = None
+            stall_since = None
+            stall_position = (p.x, p.y)
+            stall_heading = p.heading
+            end_heading = final_heading_deg
+
+            while True:
+                dt = r.tick()  # Services X/Y tracking, all mechanisms, cancellation.
+                now = r.hw.now()
+                if now - started >= timeout:
+                    return r.failure(Result.TIMED_OUT, "Navigation action deadline")
+                if dt <= 0:
+                    r.hw.pause()
+                    continue
+                position = (p.x, p.y)
+                target, closest, cross, remaining = path.sample(
+                    position, c.NAV_LOOKAHEAD_MM, c.NAV_WAYPOINT_RADIUS_MM)
+                distance = path.distance(position, path.points[-1])
+                if cross > c.NAV_MAX_CROSS_MM:
+                    return r.failure(Result.PATH_ERROR, "Too far from active path segment")
+
+                if cross > c.NAV_RECOVERY_CROSS_MM and recovery_since is None:
+                    recovery_since = now
+                    recovery_count += 1
+                    if recovery_count > c.NAV_RECOVERY_ATTEMPTS:
+                        return r.failure(Result.PATH_ERROR, "Path recovery attempts exhausted")
+                if recovery_since is not None:
+                    if cross <= c.NAV_RECOVERY_CROSS_MM * 0.5:
+                        recovery_since = None
+                    elif now - recovery_since >= c.NAV_RECOVERY_TIMEOUT_MS:
+                        return r.failure(Result.PATH_ERROR, "Path recovery timed out")
+                    else:
+                        target = closest  # Rejoin at low speed; do not skip ahead.
+
+                position_ok = path.at_last_segment() and distance <= c.NAV_POSITION_TOL_MM
+                if position_ok:
+                    # First stop translation, then finish the requested heading.
+                    if end_heading is None:
+                        end_heading = p.heading
+                    desired_heading = end_heading
+                    desired_speed = 0.0
+                    mode = "finish"
+                else:
+                    if final_heading_deg is None:
+                        end_heading = None
+                    dx, dy = target[0] - p.x, target[1] - p.y
+                    desired_heading = math.degrees(math.atan2(dx, dy)) + (180.0 if reverse else 0.0)
+                    bearing_error = angle_error(desired_heading, p.heading)
+                    # Slow for corners and endpoints; don't drive away while facing
+                    # the wrong direction. Rotation can reorient after an overshoot.
+                    available = min(speed_limit, c.NAV_POSITION_KP * remaining,
+                                    math.sqrt(2.0 * c.DECEL_MM_S2 * remaining))
+                    if recovery_since is not None:
+                        available = min(available, c.NAV_RECOVERY_SPEED_MM_S)
+                    if abs(bearing_error) >= c.NAV_ALIGN_DEG:
+                        desired_speed = 0.0
+                        mode = "align"
+                    else:
+                        desired_speed = direction * available * max(0.0, math.cos(math.radians(bearing_error)))
+                        mode = "travel"
+
+                error = angle_error(desired_heading, p.heading)
+                desired_turn = pid.update(error, p.heading, dt, c.MAX_TURN_WHEEL_MM_S)
+                if position_ok and p.speed > c.SETTLE_SPEED_MM_S:
+                    desired_turn = 0.0
+                rate = c.ACCEL_MM_S2 if abs(desired_speed) > abs(speed) else c.DECEL_MM_S2
+                speed = approach(speed, desired_speed, rate * dt)
+                turn = approach(turn, desired_turn, c.TURN_SLEW_MM_S2 * dt)
+                done = (position_ok and abs(error) <= c.HEADING_TOL_DEG
+                        and p.speed <= c.SETTLE_SPEED_MM_S
+                        and abs(p.angular_rate) <= c.SETTLE_RATE_DEG_S)
+                if settled.update(done, now):
+                    r.log("nav arrived", distance, cross)
+                    return Result(Result.ARRIVED)
+
+                # A monotonic best-distance/angle watchdog catches creep and loops.
+                # Reset only at a waypoint or a change between travel and turning.
+                if path.index != previous_index or mode != previous_mode:
+                    progress_since = now
+                    best_remaining, best_angle = remaining, abs(error)
+                    previous_index, previous_mode = path.index, mode
+                improved = ((mode == "travel" and remaining < best_remaining - c.STALL_MIN_PROGRESS_MM)
+                            or (mode != "travel" and abs(error) < best_angle - c.STALL_MIN_ROTATION_DEG))
+                if improved:
+                    progress_since = now
+                    best_remaining, best_angle = min(best_remaining, remaining), min(best_angle, abs(error))
+                if not done and now - progress_since >= c.NAV_NO_PROGRESS_MS:
+                    return r.failure(Result.STALLED, "No useful navigation progress")
+
+                # Faster detection of a commanded move/turn that produces no motion.
+                translating = abs(speed) >= c.STALL_COMMAND_MM_S
+                rotating = abs(turn) >= c.STALL_COMMAND_MM_S
+                moved = path.distance(position, stall_position) >= c.STALL_MIN_PROGRESS_MM
+                turned = abs(p.heading - stall_heading) >= c.STALL_MIN_ROTATION_DEG
+                if translating or rotating:
+                    if stall_since is None or (moved if translating else turned):
+                        stall_since, stall_position, stall_heading = now, position, p.heading
+                    elif now - stall_since >= c.STALL_WINDOW_MS:
+                        return r.failure(Result.STALLED, "No motion during navigation")
+                else:
+                    stall_since = None
+                r.drive.command(speed + turn, speed - turn)
+                label = "rejoin%d %s" % (recovery_count, mode) if recovery_since is not None else mode
+                r.log("nav %s segment=%d" % (label, path.index), distance, cross)
+                r.hw.pause()
+        except ActionFault as fault:
+            return r.failure(fault.result.status, fault.result.detail)
+        except Exception:
+            r.stop_all()
+            raise
+        finally:
+            r.drive.stop()
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+class Robot:
+    def __init__(self, hardware, spec=RobotSpec, config=ControlConfig):
+        self.hw, self.spec, self.cfg = hardware, spec, config
+        self.drive = Drive(hardware, spec, config)
+        self.tracking = Tracking(hardware, spec, config)
+        self.navigator = Navigator(self)
+        self.lift = Mechanism("lift", hardware.lift, hardware, config, config.LIFT_MAX_SKEW_DEG)
+        self.left_wing = Mechanism("left wing", (hardware.wings[0],), hardware, config)
+        self.right_wing = Mechanism("right wing", (hardware.wings[1],), hardware, config)
+        self.mechanisms = (self.lift, self.left_wing, self.right_wing)
+        self.ready = False
+        self.active = lambda: False
+        self.route_deadline = None
+        self.last_log = -config.LOG_INTERVAL_MS
+
+    def stop_all(self):
+        self.drive.stop()
+        for mechanism in self.mechanisms:
+            mechanism.stop()
+
+    def failure(self, status, detail):
+        # Failure of any action cancels pending mechanism work as well as driving.
+        self.stop_all()
+        return Result(status, detail)
+
+    def prepare(self):
+        self.ready = False
+        self.stop_all()
+        errors = self.spec.validate()
+        if errors:
+            for error in errors:
+                print("CONFIG: " + error)
+            self.hw.show("Fill RobotSpec; autonomous not ready")
+            return Result(Result.NOT_READY, "; ".join(errors))
+        try:
+            self.hw.check_devices()
+            self.hw.show("Keep robot still: calibrating")
+            self.hw.imu.calibrate()
+            started = self.hw.now()
+            while self.hw.imu.is_calibrating():
+                if self.hw.now() - started >= self.cfg.CALIBRATION_TIMEOUT_MS:
+                    raise ActionFault(Result.TIMED_OUT, "IMU calibration")
+                self.hw.pause()
+            for motor, position in zip(self.hw.lift, self.spec.LIFT_REFERENCE_DEG):
+                motor.set_position(position, DEGREES)
+            for motor, position in zip(self.hw.wings, self.spec.WING_REFERENCE_DEG):
+                motor.set_position(position, DEGREES)
+            self.hw.check_devices()
+            self.ready = True
+            self.hw.show("Ready: place at configured start pose")
+            return Result(Result.ARRIVED)
+        except ActionFault as fault:
+            self.hw.show(fault.result.status + ": " + fault.result.detail)
+            return fault.result
+
+    def begin_autonomous(self, active):
+        self.active = active
+        self.stop_all()
+        if not self.ready:
+            raise ActionFault(Result.NOT_READY, "Calibration/configuration incomplete")
+        if not active():
+            raise ActionFault(Result.CANCELLED, "Autonomous is not enabled")
+        self.hw.check_devices()
+        self.tracking.reset(self.spec.START_X_MM, self.spec.START_Y_MM,
+                            self.spec.START_HEADING_DEG)
+        self.route_deadline = self.hw.now() + self.cfg.ROUTE_TIMEOUT_MS
+
+    def tick(self):
+        if not self.active():
+            raise ActionFault(Result.CANCELLED, "Competition disabled or changed mode")
+        if self.route_deadline is not None and self.hw.now() >= self.route_deadline:
+            raise ActionFault(Result.TIMED_OUT, "Autonomous time budget exhausted")
+        self.hw.check_devices()
+        dt = self.tracking.update()
+        for mechanism in self.mechanisms:
+            mechanism.update()
+        return dt
+
+    def log(self, name, distance_error=0.0, cross_error=0.0):
+        now = self.hw.now()
+        if now - self.last_log >= self.cfg.LOG_INTERVAL_MS:
+            self.last_log = now
+            p = self.tracking
+            print("%s t=%d x=%.1f y=%.1f h=%.1f dist_err=%.1f cross=%.1f speed=%.1f" %
+                  (name, now, p.x, p.y, p.heading, distance_error, cross_error, p.speed))
+
+    def drive_distance(self, distance_mm, heading_deg, max_speed_mm_s, timeout_ms=None):
+        """Signed straight segment. X feedback steers out moderate lateral drift.
+
+        Large lateral displacement near the endpoint may not be recoverable without
+        another maneuver. Report failure instead of falsely declaring arrival.
+        """
+        timeout = self.cfg.ACTION_TIMEOUT_MS if timeout_ms is None else timeout_ms
+        started = self.hw.now()
+        p, c = self.tracking, self.cfg
+        start_x, start_y = p.x, p.y
+        heading = math.radians(heading_deg)
+        distance_pid = PID(c.DISTANCE_KP, kd=c.DISTANCE_KD, tau=c.RATE_FILTER_TAU_S)
+        heading_pid = PID(c.HEADING_KP, kd=c.HEADING_KD, tau=c.RATE_FILTER_TAU_S)
+        settled = Settler(c.SETTLE_MS)
+        speed = turn = 0.0
+        stall_since, stall_progress = None, 0.0
+        try:
+            if (not finite(distance_mm) or not finite(heading_deg)
+                    or not finite(max_speed_mm_s) or max_speed_mm_s <= 0
+                    or not finite(timeout) or timeout <= 0):
+                raise ValueError("Invalid drive parameters")
+            limit = min(max_speed_mm_s, c.MAX_SPEED_MM_S)
+            while True:
+                dt = self.tick()
+                now = self.hw.now()
+                if now - started >= timeout:
+                    return self.failure(Result.TIMED_OUT, "drive distance")
+                if dt <= 0:
+                    self.hw.pause()
+                    continue
+                dx, dy = p.x - start_x, p.y - start_y
+                progress = dx * math.sin(heading) + dy * math.cos(heading)
+                cross = dx * math.cos(heading) - dy * math.sin(heading)
+                error = distance_mm - progress
+                if abs(cross) > c.MAX_CROSS_TRACK_MM:
+                    return self.failure(Result.PATH_ERROR, "Lateral displacement exceeds recovery limit")
+                target_speed = distance_pid.update(error, progress, dt, limit)
+                braking_limit = math.sqrt(2.0 * c.DECEL_MM_S2 * abs(error))
+                target_speed = clamp(target_speed, -braking_limit, braking_limit)
+                position_ok = abs(error) <= c.DISTANCE_TOL_MM and abs(cross) <= c.CROSS_TRACK_TOL_MM
+                if position_ok:
+                    target_speed = 0.0
+                travel_sign = 1 if target_speed >= 0 else -1
+                correction = clamp(math.degrees(math.atan2(-cross * travel_sign,
+                                   c.CROSS_TRACK_LOOKAHEAD_MM)),
+                                   -c.MAX_STEERING_OFFSET_DEG, c.MAX_STEERING_OFFSET_DEG)
+                desired_heading = heading_deg if position_ok else heading_deg + correction
+                target_turn = heading_pid.update(angle_error(desired_heading, p.heading),
+                                                p.heading, dt, c.MAX_TURN_WHEEL_MM_S)
+                if speed * target_speed < 0:  # Brake before reversing translation.
+                    speed = approach(speed, 0.0, c.DECEL_MM_S2 * dt)
+                else:
+                    rate = c.ACCEL_MM_S2 if abs(target_speed) > abs(speed) else c.DECEL_MM_S2
+                    speed = approach(speed, target_speed, rate * dt)
+                turn = approach(turn, target_turn, c.TURN_SLEW_MM_S2 * dt)
+                done = (position_ok and abs(angle_error(heading_deg, p.heading)) <= c.HEADING_TOL_DEG
+                        and p.speed <= c.SETTLE_SPEED_MM_S
+                        and abs(p.angular_rate) <= c.SETTLE_RATE_DEG_S)
+                if settled.update(done, now):
+                    return Result(Result.ARRIVED)
+                if abs(speed) >= c.STALL_COMMAND_MM_S:
+                    if stall_since is None or abs(progress - stall_progress) >= c.STALL_MIN_PROGRESS_MM:
+                        stall_since, stall_progress = now, progress
+                    elif now - stall_since >= c.STALL_WINDOW_MS:
+                        return self.failure(Result.STALLED, "No tracking-wheel progress during drive")
+                else:
+                    stall_since = None
+                self.drive.command(speed + turn, speed - turn)
+                self.log("drive", error, cross)
+                self.hw.pause()
+        except ActionFault as fault:
+            return self.failure(fault.result.status, fault.result.detail)
+        finally:
+            self.drive.stop()
+
+    def turn_to_heading(self, target_deg, timeout_ms=None):
+        c, p = self.cfg, self.tracking
+        timeout = c.ACTION_TIMEOUT_MS if timeout_ms is None else timeout_ms
+        started = self.hw.now()
+        pid = PID(c.TURN_KP, kd=c.TURN_KD, tau=c.RATE_FILTER_TAU_S)
+        settled = Settler(c.SETTLE_MS)
+        command = 0.0
+        stall_since, stall_heading = None, p.heading
+        try:
+            if not finite(target_deg) or not finite(timeout) or timeout <= 0:
+                raise ValueError("Invalid turn parameters")
+            while True:
+                dt = self.tick()
+                now = self.hw.now()
+                if now - started >= timeout:
+                    return self.failure(Result.TIMED_OUT, "turn")
+                if dt <= 0:
+                    self.hw.pause()
+                    continue
+                error = angle_error(target_deg, p.heading)
+                desired = pid.update(error, p.heading, dt, c.MAX_TURN_WHEEL_MM_S)
+                command = approach(command, desired, c.TURN_SLEW_MM_S2 * dt)
+                if settled.update(abs(error) <= c.HEADING_TOL_DEG
+                                  and abs(p.angular_rate) <= c.SETTLE_RATE_DEG_S
+                                  and p.speed <= c.SETTLE_SPEED_MM_S, now):
+                    return Result(Result.ARRIVED)
+                if abs(command) >= c.STALL_COMMAND_MM_S:
+                    if stall_since is None or abs(p.heading - stall_heading) >= c.STALL_MIN_ROTATION_DEG:
+                        stall_since, stall_heading = now, p.heading
+                    elif now - stall_since >= c.STALL_WINDOW_MS:
+                        return self.failure(Result.STALLED, "No IMU rotation during turn")
+                else:
+                    stall_since = None
+                self.drive.command(command, -command)
+                self.log("turn")
+                self.hw.pause()
+        except ActionFault as fault:
+            return self.failure(fault.result.status, fault.result.detail)
+        finally:
+            self.drive.stop()
+
+    def wait_for(self, mechanism=None, duration_ms=0):
+        """Keep tracking, cancellation and mechanism deadlines alive while waiting."""
+        started = self.hw.now()
+        try:
+            while True:
+                self.tick()
+                if ((mechanism is None or not mechanism.active)
+                        and self.hw.now() - started >= duration_ms):
+                    return Result(Result.ARRIVED)
+                self.hw.pause()
+        except ActionFault as fault:
+            return self.failure(fault.result.status, fault.result.detail)
+
+    def require(self, result, step):
+        print("%s: %s %s" % (step, result.status, result.detail))
+        if not result.ok():
+            raise ActionFault(result.status, step + ": " + result.detail)
+
+    def set_claw(self, closed):
+        self.tick()
+        self.hw.claw.set(self.spec.CLAW_CLOSED if closed else not self.spec.CLAW_CLOSED)
+
+    def go_to_pose(self, x_mm, y_mm, heading_deg=None, max_speed_mm_s=None,
+                   reverse=False, timeout_ms=None):
+        """Reach an absolute field position, then settle at the final heading."""
+        return self.follow_path([(x_mm, y_mm)], heading_deg, max_speed_mm_s,
+                                reverse, timeout_ms)
+
+    def follow_path(self, waypoints, final_heading_deg=None, max_speed_mm_s=None,
+                    reverse=False, timeout_ms=None):
+        """Ordered absolute destinations; current pose is automatically the start."""
+        return self.navigator.follow_path(waypoints, final_heading_deg,
+                                          max_speed_mm_s, reverse, timeout_ms)
+
+
+
+# Development source fragment; build_vex.py concatenates fragments in filename order.
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+def run_route(robot):
+    """Sample task sequence, now with precise turns and checked outcomes.
+
+    The old 500 ms drive is distance travel here, NOT an inferred contact/push.
+    Survey the distances and validate the now fully completed 90-degree turn.
+    """
+    # Tune the sample route here as the field route changes. These values are
+    # deliberately local to the route instead of hidden behind a config class.
+    legacy_sensor_turns_per_unit = 0.31
+    first_leg_units = 4.0
+    second_leg_units = 5.0
+    final_approach_units = 5.0
+    retreat_units = 2.0
+    last_leg_units = 3.0
+    first_turn_deg = 90.0
+    last_turn_deg = 50.0
+    lift_carry_deg = 300.0
+    lift_release_deg = 100.0
+    lift_clear_deg = 150.0
+    right_wing_deploy_deg = 300.0
+    mechanism_speed_pct = 80
+
+    c, s = robot.cfg, robot.spec
+    unit_mm = (legacy_sensor_turns_per_unit * math.pi * s.TRACK_Y_DIAMETER_MM
+               / s.TRACK_Y_SENSOR_TURNS_PER_WHEEL_TURN)
+    robot.set_claw(True)
+    robot.lift.start(lift_carry_deg, mechanism_speed_pct)
+    robot.right_wing.start(right_wing_deploy_deg, mechanism_speed_pct)
+    robot.require(robot.wait_for(robot.right_wing), "deploy right wing")
+    robot.require(robot.drive_distance(first_leg_units * unit_mm,
+                  s.START_HEADING_DEG, 0.7 * c.MAX_SPEED_MM_S), "first leg")
+    robot.require(robot.turn_to_heading(first_turn_deg), "first turn")
+    robot.require(robot.drive_distance(second_leg_units * unit_mm,
+                  first_turn_deg, c.MAX_SPEED_MM_S), "second leg")
+    robot.require(robot.drive_distance(final_approach_units * unit_mm,
+                  first_turn_deg, 0.5 * c.MAX_SPEED_MM_S), "final approach")
+    robot.require(robot.wait_for(robot.lift), "finish carry lift")
+    robot.lift.start(lift_release_deg, mechanism_speed_pct)
+    robot.require(robot.wait_for(robot.lift), "lower before release")
+    robot.set_claw(False)
+    robot.require(robot.wait_for(duration_ms=150), "claw release dwell")
+    robot.lift.start(lift_clear_deg, mechanism_speed_pct)
+    robot.require(robot.wait_for(robot.lift), "clear released object")
+    robot.lift.start(lift_carry_deg, mechanism_speed_pct)
+    robot.require(robot.drive_distance(-retreat_units * unit_mm,
+                  first_turn_deg, 0.7 * c.MAX_SPEED_MM_S), "retreat")
+    robot.require(robot.turn_to_heading(last_turn_deg), "last turn")
+    robot.require(robot.drive_distance(last_leg_units * unit_mm,
+                  last_turn_deg, 0.3 * c.MAX_SPEED_MM_S), "last leg")
+    robot.require(robot.wait_for(robot.lift), "finish lift")
+
+# Development source fragment; build_vex.py concatenates fragments in filename order.
+
+"""Navigation sample; points are absolute field coordinates."""
+
+
+def run_navigation_example(robot):
+    # Tune the navigation sample here as the test field changes.
+    points_mm = ((0.0, 400.0), (300.0, 600.0))
+    final_heading_deg = 90.0
+    speed_mm_s = 250.0
+    timeout_ms = 10000
+
+    robot.require(robot.follow_path(
+        points_mm,
+        final_heading_deg=final_heading_deg,
+        max_speed_mm_s=speed_mm_s,
+        timeout_ms=timeout_ms,
+    ), "navigation example")
+
+# Deployment source fragment; build_vex.py concatenates fragments in filename order.
+AUTONOMOUS_ROUTE = "sample"  # "sample" or "navigation_example"
+
+
+def main():
+    hw = Hardware(RobotSpec)
+    robot = Robot(hw)
+    competition = None
+
+    def autonomous():
+        try:
+            robot.begin_autonomous(lambda: competition.is_enabled() and competition.is_autonomous())
+            if AUTONOMOUS_ROUTE == "sample":
+                run_route(robot)
+            elif AUTONOMOUS_ROUTE == "navigation_example":
+                run_navigation_example(robot)
+            else:
+                raise ValueError("Unknown AUTONOMOUS_ROUTE")
+            hw.show("Autonomous ARRIVED")
+        except ActionFault as fault:
+            hw.show(fault.result.status + ": " + fault.result.detail)
+        except Exception as error:
+            hw.show("Autonomous error: " + str(error))
+        finally:
+            robot.stop_all()
+
+    def user_control():
+        # No persistent claw thread: only the active mode owns actuator commands.
+        if not robot.ready:
+            hw.show("NOT_READY: check RobotSpec/calibration")
+            return
+        robot.stop_all()
+        previous_claw_button = False
+        try:
+            while competition.is_enabled() and competition.is_driver_control():
+                a3 = hw.controller.axis3.position()
+                a1 = hw.controller.axis1.position()
+                turn = a1 * abs(a1) / 100.0
+                if abs(a3) + abs(turn) <= 3:
+                    robot.drive.stop()
+                else:
+                    scale = robot.cfg.MAX_SPEED_MM_S / 100.0
+                    robot.drive.command((a3 + turn) * scale, (a3 - turn) * scale)
+                pressed = hw.controller.buttonR1.pressing()
+                if pressed and not previous_claw_button:
+                    hw.claw.set(not hw.claw.value())
+                previous_claw_button = pressed
+                for motor in hw.lift:
+                    if hw.controller.buttonL1.pressing():
+                        motor.spin(FORWARD, 100, PERCENT)
+                    elif hw.controller.buttonL2.pressing():
+                        motor.spin(REVERSE, 100, PERCENT)
+                    else:
+                        motor.stop(HOLD)
+                for motor in hw.wings:
+                    if hw.controller.buttonR2.pressing():
+                        motor.spin(FORWARD, 100, PERCENT)
+                    else:
+                        motor.stop(HOLD)
+                hw.pause()
+        finally:
+            robot.stop_all()
+
+    # Calibration completes before competition callbacks are installed.
+    wait(200, MSEC)  # Allow smart-port devices to initialize before presence checks.
+    robot.prepare()
+    competition = Competition(user_control, autonomous)
+    while True:
+        wait(100, MSEC)
+
+
+if __name__ == "__main__":
+    main()
