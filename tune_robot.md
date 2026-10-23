@@ -214,3 +214,94 @@ The most important values to measure correctly are the tracking-wheel
 diameters, tracking sensor ratios, tracking rotation offsets, drive-wheel
 diameters, and drive gearing. Incorrect physical values cannot be fixed
 reliably by changing PID gains.
+
+## Measuring `TRACK_X_ROTATION_MM_PER_RAD`
+
+`TRACK_X_ROTATION_MM_PER_RAD` compensates for X-tracking-wheel movement caused
+by the robot rotating in place.
+
+It is used in `Tracking.update()` approximately as:
+
+```python
+corrected_x_change = (
+    measured_x_change
+    - heading_change_rad * TRACK_X_ROTATION_MM_PER_RAD
+)
+```
+
+The units are:
+
+```text
+millimeters of X-wheel travel per radian of robot rotation
+```
+
+Geometrically, it is approximately the signed distance between the X tracking
+wheel and the robot's rotation center. It should be measured because wheel
+alignment, mounting flex, and contact pressure affect the real value.
+
+### Measurement procedure
+
+First ensure these values are already correct:
+
+```python
+TRACK_X_DIAMETER_MM
+TRACK_X_SENSOR_TURNS_PER_WHEEL_TURN
+TRACK_X_SIGN
+IMU_SIGN
+```
+
+Then:
+
+1. Place the robot on its normal driving surface.
+2. Keep the robot's center approximately fixed.
+3. Reset the X tracking sensor and IMU readings.
+4. Rotate the robot in place through several full turns.
+5. Record the X tracking sensor movement and the IMU heading change.
+6. Convert the X sensor movement into millimeters:
+
+```text
+x_travel_mm =
+    sensor_degrees / 360
+    × π
+    × TRACK_X_DIAMETER_MM
+    / TRACK_X_SENSOR_TURNS_PER_WHEEL_TURN
+    × TRACK_X_SIGN
+```
+
+7. Convert heading change into radians:
+
+```text
+heading_change_rad =
+    heading_change_degrees × π / 180 × IMU_SIGN
+```
+
+8. Calculate:
+
+```text
+TRACK_X_ROTATION_MM_PER_RAD =
+    x_travel_mm / heading_change_rad
+```
+
+For example, if the X tracking wheel moves `120 mm` during a clockwise full
+turn:
+
+```text
+TRACK_X_ROTATION_MM_PER_RAD = 120 / (2π) ≈ 19.1 mm/rad
+```
+
+Use several rotations and average the results. Measuring both clockwise and
+counterclockwise rotations is better; the signed ratios should be similar.
+
+With the current coordinate convention, the X tracking wheel is expected to be
+ahead of the robot's center. During a positive clockwise rotation, it should
+generally report positive X movement, so its value will usually be positive.
+
+After setting the value, test an in-place rotation:
+
+- Estimated X should return close to its starting value.
+- If X drifts during rotation, adjust the value.
+- If the correction makes the drift worse, reverse the value's sign or recheck
+  `TRACK_X_SIGN` and `IMU_SIGN`.
+
+This parameter is not the distance between the left and right drive wheels. It
+describes the X tracking wheel's response to robot rotation.
